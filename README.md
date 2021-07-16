@@ -11,7 +11,7 @@ This repo is under construction.
 - [ ] The interface
 - [ ] The training script
 
-For the trianing dataset, please refer to udpates from [Table2Charts](https://github.com/microsoft/Table2Charts).     
+For the training dataset, please refer to udpates from [Table2Charts](https://github.com/microsoft/Table2Charts).     
 
 ## How to run the model & benchmark?  
 [Demo.ipynb](https://github.com/Franches/MultiVision/blob/master/Demo.ipynb) demonstrates how to run the trained model.    
