@@ -8,6 +8,8 @@ Given a data table, MultiVision recommends a chart and/or an MV containing multi
 ## Content   
 This repo is under construction.
 - [x] The trained model and demo
+- [ ] Tutorial for running the scoring model
+- [ ] The visual encoding recommender 
 - [ ] The interface
 - [ ] The training script
 
