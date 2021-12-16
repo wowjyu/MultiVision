@@ -2,6 +2,8 @@
 .DS_Store
 /.word_vectors_cache
 
+web/
+
 ## dataset
 /dataset  
 *.npy

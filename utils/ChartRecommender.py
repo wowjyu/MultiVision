@@ -13,20 +13,24 @@ from sklearn.preprocessing import minmax_scale
 
 class ChartRecommender:
 
-    def __init__(self, csv_file: str, word_embedding_dict: dict, column_score_model, chart_type_model) -> None:
+    def __init__(self, df, word_embedding_dict: dict, column_score_model, chart_type_model) -> None:
         """Init the recommender
 
         Args:
-            csv_file (str): The path of input csv file
+            df (pandas.DataFrame): the input data table
         """
-        self.df = pd.read_csv(csv_file)
-        self.feature_dict = self.compute_columns_feature(self.df, word_embedding_dict)
+        self.df = df 
+        column_features = self.compute_columns_feature(self.df, word_embedding_dict)
+
+        self.feature_dict = column_features['features']
+        self.fields = column_features['fields']
 
         ## enumerate possible charts 
         self.charts_indices = self.enumerate_chart(self.df)
 
         ## assess the quality of each chart
         self.charts = self.recommend_chart(self.charts_indices, self.feature_dict, column_score_model, chart_type_model)
+        self.charts = self.apply_hard_rule(self.charts)
 
     def recommend_chart(self, charts_indices, feature_dict, column_score_model, chart_type_model):
         """Evaluates the model and recommends single chart
@@ -38,7 +42,7 @@ class ChartRecommender:
             chart_type_model: trained model
 
         Returns:
-            [type]: [description]
+            charts: a list of charts
         """
         seq_length = 4 ## max number of columns per chart is 4
 
@@ -77,7 +81,14 @@ class ChartRecommender:
         charts = []
         for cidx, chart_indices in enumerate(charts_indices):
             for t in types[cidx]:
-                charts.append({'indices': chart_indices, 'column_selection_score': chart_scores[cidx], 'chart_type': t['type'], 'chart_type_prob': t['p'], 'final_score': chart_scores[cidx] * t['p']})
+                chart_obj = {'indices': chart_indices, 
+                    'fields': [self.fields[idx] for idx in chart_indices], 
+                    'column_selection_score': chart_scores[cidx], 
+                    'chart_type': t['type'], 
+                    'chart_type_prob': t['p'], 
+                    'final_score': chart_scores[cidx] * t['p'], 
+                    'n_column': len(chart_indices)}
+                charts.append(chart_obj)
         return charts
 
     def enumerate_chart(self, df):
@@ -99,7 +110,7 @@ class ChartRecommender:
 
         return charts_indices
 
-    def compute_columns_feature(self, df, word_embedding_dict) -> dict:
+    def compute_columns_feature(self, df, word_embedding_dict):
         """Convert the data table into features of each column.
 
         Args:
@@ -107,9 +118,23 @@ class ChartRecommender:
             word_embedding_dict (dict): The pre-trained word embedding model
 
         Returns:
-            dict: {column_index: column_feature}
+            {
+                'features': (dict) {column_index: column_feature},
+                'fields': ('index': {"name","index","type"}). The head-name, column-index, data type of each data column.
+            }
         """
+        def field_type(idx):
+            """ Convert the idx to field type. See get_data_features in featureExtractor.py """ 
+            if (idx == 1):
+                return "nominal";
+            elif (idx ==3 or idx == 7):
+                return "temporal";
+            elif (idx == 5):
+                return "quantitative";
+            return "";
+
         feature_dict = {}
+        fields = {}
         for cIdx, column_header in enumerate(df.columns):
             column_values = df[column_header].tolist()
             dataType, data_features = featureExtractor.get_data_features(column_values)
@@ -123,37 +148,62 @@ class ChartRecommender:
 
             feature = np.nan_to_num(np.array(feature), 0)
             feature_dict[cIdx] = feature.tolist()
-        return feature_dict
 
-    def recommend_mv(self, mv_model, current_mv = [], max_charts = 5, min_chart_type_prob = 0.2):
+            fields[cIdx] = {
+                "name": column_header,
+                "index": cIdx,
+                "type": field_type(dataType)
+            }
+
+        return {"features": feature_dict, "fields": fields}
+        
+
+    def recommend_next(self, mv_model, current_mv = [], min_column_selection_score = 0.2):
+        """Recommend the next one chart given the current MV
+
+        Args:
+            mv_model (): the trained mv model
+            current_mv (list, optional): The current mv. Defaults to [].
+            min_column_selection_score (float, optional): Minimal column_selection_score for fast computation. Defaults to 0.2.
+
+        Returns:
+            candidate_charts, scores: array-like. The candidate charts and their scores
+        """        
+        def isExist(chart, charts):
+            """Check if chart is in charts by the encoded data columns."""
+            return any(chart['indices'] == c['indices'] for c in charts)
+
+        def get_candidate_charts(current_mv):
+            charts_pool = [x for x in self.charts if x['column_selection_score'] > min_column_selection_score] ## filter bad visual encoding for fast computation
+            return [x for x in charts_pool if not isExist(x, current_mv)]
+        
+        candidate_charts = get_candidate_charts(current_mv)
+        
+        scores = []
+        for candidate_chart in candidate_charts:
+            ## add the candidate_chart to current_mv => new MV
+            new_mv = [*current_mv, candidate_chart]
+            
+            ## use the trained model
+            chart_feature_dl = mvFeatureExtractor.charts_to_features_dl(new_mv, self.charts, seq_length = 12) ## the max number of charts in an MV is 12
+            mv_model_inut = Variable(torch.Tensor([chart_feature_dl])).cuda().float() 
+            scores.append(mv_model(mv_model_inut).tolist()[0])
+
+        return candidate_charts, scores
+
+
+    def recommend_mv(self, mv_model, current_mv = [], max_charts = 5, min_column_selection_score = 0.2):
         """[summary]
 
         Args:
             mv_model (): the trained mv model
             current_mv (list, optional): The current mv. Defaults to [].
             max_charts (int, optional): The max number of charts. Defaults to 5.
-            min_chart_type_prob (float, optional): Minimal chart_type_prob for fast computation. Defaults to 0.2.
+            min_column_selection_score (float, optional): Minimal column_selection_score for fast computation. Defaults to 0.2.
         """
-        def isExist(chart, charts):
-            """Check if chart is in charts by the encoded data columns."""
-            return any(chart['indices'] == c['indices'] for c in charts)
-
-        def get_candidate_charts(current_mv):
-            charts_pool = [x for x in self.charts if x['chart_type_prob'] > min_chart_type_prob] ## filter bad visual encoding for fast computation
-            return [x for x in charts_pool if not isExist(x, current_mv)]
-
         while len(current_mv) < max_charts:
-            candidate_charts = get_candidate_charts(current_mv)
-            
-            scores = []
-            for candidate_chart in candidate_charts:
-                ## add the candidate_chart to current_mv => new MV
-                new_mv = [*current_mv, candidate_chart]
-                
-                ## use the trained model
-                chart_feature_dl = mvFeatureExtractor.charts_to_features_dl(new_mv, self.charts, seq_length = 12) ## the max number of charts in an MV is 12
-                mv_model_inut = Variable(torch.Tensor([chart_feature_dl])).cuda().float() 
-                scores.append(mv_model(mv_model_inut).tolist()[0])
+            ## recommend the next chart 
+            candidate_charts, scores = self.recommend_next(mv_model, current_mv, min_column_selection_score)
 
             ## get the highest score and select it (greedy algorithm)
             max_score_index = np.argmax(scores)
@@ -163,3 +213,30 @@ class ChartRecommender:
             current_mv.append(max_score_chart)      
 
         return current_mv
+
+    def apply_hard_rule(self, charts):
+        """Filter the charts by hard rules/constraints
+
+        Args:
+            charts (List[dict]): a list of chart dicts
+        """
+        def count_field_types(chart, field_types):
+            filtered = [x for x in chart['fields'] if x['type'] in field_types]
+            return len(filtered)
+
+        def is_valid(chart):
+            if chart['chart_type'] == 'line' and count_field_types(chart, ['nominal']) >= 2:
+                ## prevent a line chart from encoding two nominal fields
+                return False
+            elif chart['chart_type'] == 'line' and count_field_types(chart, ['temporal']) == 0:
+                ## prevent a line chart without a temporal field 
+                ## note: this rule can be softed by introducing aggregation such as binning
+                return False
+            elif chart['chart_type'] == 'pie' and chart['n_column'] > 1:
+                ## prevent a pie chart encoding >1 column
+                return False
+            return True
+
+        filtered_charts = [c for c in charts if is_valid(c)]
+        return filtered_charts
+
